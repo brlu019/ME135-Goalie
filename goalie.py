@@ -74,9 +74,9 @@ def getGoalPositions(cap):
 
             if len(marker_centers) == 2:
                 cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 2)
-                cv2.putText(frame, f"{marker_centers[0]}", (marker_centers[0][0]+10, marker_centers[0][1]),
+                cv2.putText(frame, f"Marker 1{marker_centers[0]}", (marker_centers[0][0]+10, marker_centers[0][1]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                cv2.putText(frame, f"{marker_centers[1]}", (marker_centers[1][0]+10, marker_centers[1][1]),
+                cv2.putText(frame, f"Marker 2{marker_centers[1]}", (marker_centers[1][0]+10, marker_centers[1][1]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         # Display frames
@@ -137,7 +137,15 @@ def predictBallTrajectory(cap, frame, pts, times, goal_positions):
                 cv2.putText(frame, "Intercept", (Px + 10, Py), cv2.FONT_HERSHEY_SIMPLEX,
                             0.6, (0, 0, 255), 2)
                 
-    return velocity_x, velocity_y
+             # Calculate percentage of the goal line
+            goal_length = np.sqrt((x4 - x3)**2 + (y4 - y3)**2)
+            distance_to_marker1 = np.sqrt((Px - x3)**2 + (Py - y3)**2)
+            percentage = distance_to_marker1 / goal_length
+
+            # Display percentage on the frame
+            percentage_text = f"Intercept: {percentage:.2f}"
+            cv2.putText(frame, percentage_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (0, 255, 0), 2)
 
 def main():
     # Initialize the camera
@@ -172,10 +180,14 @@ def main():
         mask = cv2.inRange(sv, lower_range, upper_range)
         mask = morphCleaning(mask)
 
-        # Mask out goalie marker regions
-        for center in marker_centers:
+        # Mask out goalie marker regions, draw circles around them
+        for i, center in enumerate(marker_centers):
             cv2.circle(mask, center, 10, 0, -1) # Mask out a circle around each marker
-        cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 1)
+            cv2.circle(frame, center, 3, (0, 255, 255), -1)  # Draw small dot
+            cv2.putText(frame, f"Marker {i+1}", (center[0] + 5, center[1] - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        
+        cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 2)
 
         # Find contour (ball)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
