@@ -1,7 +1,12 @@
 import cv2
 import numpy as np
 import time
+import serial
 from collections import deque
+
+# Initialize serial communication with the motor controller
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1) # Adjust port as needed
+time.sleep(2)  # Wait for the serial connection to establish
 
 def nothing(x):
     pass
@@ -83,9 +88,12 @@ def getGoalPositions(cap):
         cv2.imshow("Calibration", mask)
         cv2.imshow("Frame", frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('c') and len(marker_centers) == 2:
-            goalDetected = True
-            print("Goal detected!")
+        if cv2.waitKey(1) & 0xFF == ord('c'):
+            if len(marker_centers) == 2:
+                goalDetected = True
+                print("Goal detected!")
+            else:
+                print("Please ensure two markers are visible.")
     
     cv2.destroyAllWindows()
 
@@ -96,13 +104,17 @@ def predictBallTrajectory(cap, frame, pts, times, goal_positions):
     timestamps = np.array(times)
     timestamps -= timestamps[-1]  # Normalize timestamps to start from 0
 
+    if np.abs(timestamps[0] - timestamps[-1]) < 1e-3:
+        print("Not enough time difference between points.")
+        return  # Avoid unstable regression if too little time difference
+
     # Fit a line to the x and y coordinates using linear regression
     A = np.vstack([timestamps, np.ones(len(timestamps))]).T  # Design matrix for linear regression
     velocity_x, _ = np.linalg.lstsq(A, points[:, 0], rcond=None)[0]  # Slope for x-coordinates
     velocity_y, _ = np.linalg.lstsq(A, points[:, 1], rcond=None)[0]  # Slope for y-coordinates
 
-    # Predict future position after 500 ms
-    prediction_time = 0.5
+    # Predict future position after 200 ms
+    prediction_time = 0.2
     pred_x = int(pts[0][0] + velocity_x * prediction_time)
     pred_y = int(pts[0][1] + velocity_y * prediction_time)
 
@@ -146,8 +158,42 @@ def predictBallTrajectory(cap, frame, pts, times, goal_positions):
             percentage_text = f"Intercept: {percentage:.2f}"
             cv2.putText(frame, percentage_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         0.6, (0, 255, 0), 2)
+    return percentage if denom != 0 else None
+
+def calculateMotorCommand(percentage):
+    belt_length = 0.5  # Length of the belt in meters
+    pulley_radius = 0.05  # Radius of the pulley in meters
+    encoder_resolution = 360  # Encoder resolution in counts per revolution
+
+    distance_to_move = percentage * belt_length  # Distance to move in meters
+    pulley_circumference = 2 * np.pi * pulley_radius  # Circumference of the pulley in meters
+
+    revolutions = distance_to_move / pulley_circumference  # Revolutions needed
+    encoder_counts = revolutions * encoder_resolution  # Encoder counts needed
+
+    return int(encoder_counts)  # Return as integer
+
+def sendMotorCommand(command):
+    package = command.encode()
+    try:
+        ser.write(package)  # Send command to motor controller
+        print(f"Motor command sent: {command}")
+    except serial.SerialException as e:
+        print(f"Error sending command: {e}")
+        return
+
+    response = ser.readline().decode().strip()
+    if response:
+        print(f"Response from motor controller: {response}")
+    else:
+        print("No response from motor controller.")
 
 def main():
+    # Make sure serial port is available
+    while not ser.is_open:
+        print("Waiting for serial connection...")
+        time.sleep(3)
+
     # Initialize the camera
     cap = cv2.VideoCapture(0)
     while not cap.isOpened():
@@ -161,6 +207,10 @@ def main():
     times = deque(maxlen=10)
     createTrackbars()
 
+    percentage = None
+    last_sent_percentage = None
+    prev_time = time.time()
+
     while True:
         if not cap.isOpened():
             print("Camera disconnected.")
@@ -173,6 +223,12 @@ def main():
 
         frame = cv2.resize(frame, (640, 480))
         sv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        curr_time = time.time()
+        fps = 1 / (curr_time - prev_time)
+        prev_time = curr_time
+
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
 
         lower_range, upper_range = dynamicHSVCalibration()
 
@@ -209,7 +265,13 @@ def main():
                     times.appendleft(time.time())
 
         if len(pts) >= 10:
-            predictBallTrajectory(cap, frame, pts, times, marker_centers)
+            percentage = predictBallTrajectory(cap, frame, pts, times, marker_centers)
+            if percentage is not None:
+                if last_sent_percentage is None or abs(percentage - last_sent_percentage) > 0.03:
+                    # Calculate motor command based on percentage
+                    command = calculateMotorCommand(percentage)
+                    sendMotorCommand(str(command))
+                    last_sent_percentage = percentage
 
         cv2.imshow("Ball Trajectory Prediction", frame)
         cv2.imshow("Calibration", mask)
