@@ -185,32 +185,22 @@ def predictBallTrajectory(cap, frame, pts, times, goal_positions):
     return None
 
 def calculateMotorCommand(percentage):
-    belt_length = 0.5  # Length of the belt in meters
-    pulley_radius = 0.05  # Radius of the pulley in meters
-    encoder_resolution = 360  # Encoder resolution in counts per revolution
-
-    distance_to_move = percentage * belt_length  # Distance to move in meters
-    pulley_circumference = 2 * np.pi * pulley_radius  # Circumference of the pulley in meters
-
-    revolutions = distance_to_move / pulley_circumference  # Revolutions needed
-    encoder_counts = revolutions * encoder_resolution  # Encoder counts needed
-
-    return int(encoder_counts)  # Return as integer
+    return int((13000 - 900) * percentage)  # Return as integer
 
 def sendMotorCommand(command):
     package = command.encode()
     try:
         ser.write(package)  # Send command to motor controller
-        # print(f"Motor command sent: {command}")
+        print(f"Motor command sent: {command}")
     except serial.SerialException as e:
-        # print(f"Error sending command: {e}")
+        print(f"Error sending command: {e}")
         return
 
-    # response = ser.readline().decode().strip()
-    # if response:
-    #     print(f"Response from motor controller: {response}")
-    # else:
-    #     print("No response from motor controller.")
+    response = ser.readline().decode().strip()
+    if response:
+        print(f"Response from motor controller: {response}")
+    else:
+        print("No response from motor controller.")
 
 def main():
     # Make sure serial port is available
@@ -227,8 +217,8 @@ def main():
 
     marker_centers = getGoalPositions(cap)
 
-    pts = deque(maxlen=50)  # recent 50 positions
-    times = deque(maxlen=50)
+    pts = deque(maxlen=100)  # recent 100 positions
+    times = deque(maxlen=100)
     createTrackbars()
 
     percentage = None
@@ -297,7 +287,7 @@ def main():
                         pts.appendleft(center)
                         times.appendleft(time.time())
 
-        if len(pts) >= 50 and not command_sent:  # Only process if no command has been sent
+        if len(pts) >= 100 and not command_sent:  # Only process if no command has been sent
             percentage = predictBallTrajectory(cap, frame, pts, times, marker_centers)
             if percentage is not None:
                 if last_sent_percentage is None or abs(percentage - last_sent_percentage) > 0.03:
