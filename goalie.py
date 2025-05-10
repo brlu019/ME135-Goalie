@@ -3,10 +3,29 @@ import numpy as np
 import time
 import serial
 from collections import deque
+import threading
+import queue
+import concurrent.futures
 
 # Initialize serial communication with the motor controller
-ser = serial.Serial('COM3', 115200, timeout=1)
+ser = serial.Serial('COM5', 115200, timeout=1)
 time.sleep(2)
+
+# Create a queue that always holds the latest frame
+frame_queue = queue.Queue(maxsize=1)
+
+def frame_capture_thread(cap, frame_queue):
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        # Put frame in queue, replacing the old one if necessary
+        if not frame_queue.empty():
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        frame_queue.put(frame)
 
 def nothing(x):
     pass
@@ -33,12 +52,12 @@ def dynamicHSVCalibration():
 
     return lower_range, upper_range
 
-def morphCleaning(mask):
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+# def morphCleaning(mask):
+#     kernel = np.ones((5, 5), np.uint8)
+#     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+#     mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
     
-    return mask
+#     return mask
 
 def getGoalPositions(cap):
     goalDetected = False
@@ -52,22 +71,20 @@ def getGoalPositions(cap):
             print("Failed to grab frame")
             break
 
-        frame = cv2.resize(frame, (640, 480))
+        frame = cv2.resize(frame, (540, 960))
         sv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         lower_range, upper_range = dynamicHSVCalibration()
 
         # Color mask to detect markers
         mask = cv2.inRange(sv, lower_range, upper_range)
-        mask = morphCleaning(mask)
+        # mask = morphCleaning(mask)
+        cv2.circle(mask, (500, 265), 30, 0, -1)
 
         # Find contours (markers)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         marker_centers = []
 
-        # Create a new mask to include only valid circular markers
-        filtered_mask = np.zeros_like(mask)
-
-        if len(contours) >= 2:
+        if len(contours) >= 5:
             contours = sorted(contours, key=cv2.contourArea, reverse=True)[:2]  # Get the two largest contours
 
             for cnt in contours:
@@ -86,9 +103,6 @@ def getGoalPositions(cap):
                             marker_centers.append((cx, cy))
                             cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)  # Draw detected marker centers
 
-                    # Add the valid contour to the filtered mask
-                    cv2.drawContours(filtered_mask, [cnt], -1, 255, -1)
-
             if len(marker_centers) == 2:
                 # Sort markers by x-coordinate (leftmost first)
                 marker_centers = sorted(marker_centers, key=lambda center: center[0])
@@ -103,9 +117,6 @@ def getGoalPositions(cap):
                 cv2.putText(frame, f"Marker 2 {marker_centers[1]}", 
                             (marker_centers[1][0] + 10, marker_centers[1][1]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-        # Replace the original mask with the filtered mask for display
-        cv2.imshow("Filtered Mask", filtered_mask)
 
         # Display frames
         cv2.imshow("Calibration", mask)
@@ -167,40 +178,56 @@ def predictBallTrajectory(cap, frame, pts, times, goal_positions):
             # Dot product to check direction
             dot_product = perp_goal_dx * velocity_x + perp_goal_dy * velocity_y
 
-            if dot_product > 0:  # Change to track direction towards goal
-                cv2.circle(frame, (Px, Py), 8, (0, 0, 255), -1)
-                cv2.putText(frame, "Intercept", (Px + 10, Py), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6, (0, 0, 255), 2)
-                
-             # Calculate percentage of the goal line
+            # Calculate percentage of the goal line
             goal_length = np.sqrt((x4 - x3)**2 + (y4 - y3)**2)
             distance_to_marker1 = np.sqrt((Px - x3)**2 + (Py - y3)**2)
             percentage = distance_to_marker1 / goal_length
 
-            # Display percentage on the frame
-            percentage_text = f"Intercept: {percentage:.2f}"
-            cv2.putText(frame, percentage_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0, 255, 0), 2)
             return percentage
     return None
 
 def calculateMotorCommand(percentage):
-    return int((13000 - 900) * percentage)  # Return as integer
+    return int((1950 - 80) * percentage)  # Return as integer
 
 def sendMotorCommand(command):
     package = command.encode()
+    ser.reset_input_buffer()  # Clear input buffer before sending command
+    ser.reset_output_buffer()  # Clear output buffer before sending command
     try:
         ser.write(package)  # Send command to motor controller
         print(f"Motor command sent: {command}")
     except serial.SerialException as e:
-        print(f"Error sending command: {e}")
+        # print(f"Error sending command: {e}")
         return
 
-    response = ser.readline().decode().strip()
-    if response:
-        print(f"Response from motor controller: {response}")
-    else:
-        print("No response from motor controller.")
+    # response = ser.readline().decode().strip()
+    # if response:
+    #     print(f"Response from motor controller: {response}")
+    # else:
+    #     print("No response from motor controller.")
+
+def process_frame(frame, marker_centers):
+    frame = cv2.resize(frame, (540, 960))
+    sv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_range, upper_range = dynamicHSVCalibration()
+    mask = cv2.inRange(sv, lower_range, upper_range)
+    # mask = morphCleaning(mask)
+
+    # Draw the markers, etc.
+    for i, center in enumerate(marker_centers):
+        cv2.circle(mask, center, 70, 0, -1)
+        cv2.circle(mask, (500, 265), 30, 0, -1)
+        cv2.circle(frame, center, 3, (0, 255, 255), -1)
+    cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 2)
+
+    crop_y = min(marker_centers[0][1], marker_centers[1][1])
+    # crop_x_min = marker_centers[0][0]
+    # crop_x_max = marker_centers[1][0]
+    cropped_frame = frame[crop_y:, :]
+    cropped_mask = mask[crop_y:, :]
+    
+    # Return processed ROI for further processing
+    return cropped_frame, cropped_mask
 
 def main():
     # Make sure serial port is available
@@ -209,70 +236,51 @@ def main():
         time.sleep(3)
 
     # Initialize the camera
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     while not cap.isOpened():
         print("Waiting for camera connection...")
         time.sleep(3)
     print("Camera connected.")
 
+    # Start frame capture thread
+    threading.Thread(target=frame_capture_thread, args=(cap, frame_queue), daemon=True).start()
+
     marker_centers = getGoalPositions(cap)
 
-    pts = deque(maxlen=100)  # recent 100 positions
-    times = deque(maxlen=100)
+    pts = deque(maxlen=10)  # recent 6 positions
+    times = deque(maxlen=10)
     createTrackbars()
 
     percentage = None
     last_sent_percentage = None
-    prev_time = time.time()
-    command_sent = False  # Flag to track if a command has been sent
+    command_sent = True  # Flag to track if a command has been sent, initally true
+    print("Press 'r' to reset for shot.")
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     while True:
         if not cap.isOpened():
             print("Camera disconnected.")
             break
 
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            break
+        if frame_queue.empty():
+            continue
 
-        frame = cv2.resize(frame, (640, 480))
-        sv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        frame = frame_queue.get()
+        future = executor.submit(process_frame, frame, marker_centers)
+        cropped_frame, cropped_mask = future.result()
 
-        curr_time = time.time()
-        fps = 1 / (curr_time - prev_time)
-        prev_time = curr_time
-
-        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-        lower_range, upper_range = dynamicHSVCalibration()
-
-        # Color mask to detect markers
-        mask = cv2.inRange(sv, lower_range, upper_range)
-        mask = morphCleaning(mask)
-
-        # Mask out goalie marker regions, draw circles around them
-        for i, center in enumerate(marker_centers):
-            cv2.circle(mask, center, 10, 0, -1)  # Mask out a circle around each marker
-            cv2.circle(frame, center, 3, (0, 255, 255), -1)  # Draw small dot
-            cv2.putText(frame, f"Marker {i+1}", (center[0] + 5, center[1] - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-        cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 2)
-
-        # Find contour (ball)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contour (ball) in the cropped mask
+        contours, _ = cv2.findContours(cropped_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         center = None
 
         if contours:
             # Sort contours by area and process the largest one
             c = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(c)
-            perimeter = cv2.arcLength(c, True)
-            circularity = 4 * np.pi * (area / (perimeter**2)) if perimeter > 0 else 0
 
             # Check if the contour is circular and within the frame
-            if 200 < area < 7500 and circularity > 0.7:  # Adjust thresholds as needed
+            if 100 < area < 7500:
                 ((x, y), radius) = cv2.minEnclosingCircle(c)
                 x, y, w, h = cv2.boundingRect(c)
                 if x > 0 and y > 0 and (x + w) < frame.shape[1] and (y + h) < frame.shape[0]:  # Fully within frame
@@ -281,14 +289,13 @@ def main():
                         center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
 
                         # Draw detected ball
-                        cv2.circle(frame, center, int(radius), (0, 255, 0), 2)
-                        cv2.circle(frame, center, 4, (0, 0, 255), -1)
+                        cv2.circle(cropped_frame, center, int(radius), (0, 255, 0), 2)
 
                         pts.appendleft(center)
                         times.appendleft(time.time())
 
-        if len(pts) >= 100 and not command_sent:  # Only process if no command has been sent
-            percentage = predictBallTrajectory(cap, frame, pts, times, marker_centers)
+        if len(pts) >= 10 and not command_sent:  # Only process if no command has been sent
+            percentage = predictBallTrajectory(cap, cropped_frame, pts, times, marker_centers)
             if percentage is not None:
                 if last_sent_percentage is None or abs(percentage - last_sent_percentage) > 0.03:
                     # Calculate motor command based on percentage
@@ -298,9 +305,6 @@ def main():
                     command_sent = True  # Set flag to indicate command has been sent
                     print("Motor command sent. Waiting for reset...")
 
-        # Display reset instructions
-        cv2.putText(frame, "Press 'r' to reset for next shot", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
         # Reset logic
         if cv2.waitKey(1) & 0xFF == ord('r'):  # Reset when 'r' is pressed
             command_sent = False
@@ -308,9 +312,10 @@ def main():
             times.clear()
             last_sent_percentage = None
             print("Reset complete. Ready for next shot.")
+            time.sleep(1)
 
-        cv2.imshow("Ball Trajectory Prediction", frame)
-        cv2.imshow("Calibration", mask)
+        cv2.imshow("Ball Trajectory Prediction", cropped_frame)
+        cv2.imshow("Calibration", cropped_mask)
 
         if cv2.waitKey(1) & 0xFF == 27:  # ESC key to exit
             print("Exiting...")
