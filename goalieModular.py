@@ -3,6 +3,7 @@ import numpy as np
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import PySimpleGUI as sg
+import serial.tools.list_ports
 
 class GoalieController:
     def __init__(self, comPort):
@@ -25,12 +26,19 @@ class GoalieController:
 
     def init_serial(self):
         try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
+            ports = serial.tools.list_ports.comports()
+            for port in ports:
+                print(port.device)
+            for port in ports:
+                try:
+                    temp_port = serial.Serial(port.device)
+                    if temp_port.is_open:
+                        temp_port.close()
+                except Exception as e:
+                    print(f"Error closing port {port.device}: {e}")
             # Initialize serial communication with the motor controller
             self.ser = serial.Serial(self.comPort, 115200, timeout=1)
             time.sleep(2)
-            self.ser.open()
             print("Serial port opened successfully.")
         except serial.SerialException as e:
             print(f"Error opening serial port: {e}")
@@ -67,7 +75,7 @@ class GoalieController:
             return False, None
 
     def calibrate_goals(self, window):
-
+        confirm_button = window['Confirm']
         while True:
             event, values = window.read(timeout=20)
             if event in (sg.WIN_CLOSED, 'Cancel', 'Exit'):
@@ -112,6 +120,11 @@ class GoalieController:
             window['-FRAME-'].update(data=frame_bytes)
             window['-MASK-'].update(data=mask_bytes)
 
+            if len(self.goal_positions) == 2:
+                confirm_button.update(disabled=False)
+            else:
+                confirm_button.update(disabled=True)
+            
             # if they hit Confirm and we have two markers, we’re done
             if event == 'Confirm':
                 if len(self.goal_positions) == 2:
@@ -149,7 +162,7 @@ class GoalieController:
             area = cv2.contourArea(c)
 
             # Check if the contour is circular and within the frame
-            if 100 < area < 7500:
+            if 100 < area < 1e5:
                 ((x, y), radius) = cv2.minEnclosingCircle(c)
                 x, y, w, h = cv2.boundingRect(c)
                 if x > 0 and y > 0 and (x + w) < frame.shape[1] and (y + h) < frame.shape[0]:  # Fully within frame
@@ -162,6 +175,9 @@ class GoalieController:
 
                         self.pts.appendleft(center)
                         self.times.appendleft(time.time())
+
+        for (cx, cy) in self.goal_positions:
+            cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
 
         if len(self.pts) >= 10:
             points = np.array(self.pts)
@@ -183,7 +199,7 @@ class GoalieController:
             pred_y = int(self.pts[0][1] + velocity_y * prediction_time)
 
             cv2.line(frame, self.pts[0], (pred_x, pred_y), (255, 0, 0), 2)
-            cv2.circle(frame, (pred_x, pred_y), 5, (255, 0, 0), -1)
+            # cv2.circle(frame, (pred_x, pred_y), 5, (255, 0, 0), -1)
 
             (x1, y1) = self.pts[0]
             (x2, y2) = (pred_x, pred_y)
@@ -206,15 +222,15 @@ class GoalieController:
                     perp_goal_dy = goal_dx
 
                     # Dot product to check direction
-                    dot_product = perp_goal_dx * velocity_x + perp_goal_dy * velocity_y
+                    # dot_product = perp_goal_dx * velocity_x + perp_goal_dy * velocity_y
 
                     # Calculate percentage of the goal line
                     goal_length = np.sqrt((x4 - x3)**2 + (y4 - y3)**2)
                     distance_to_marker1 = np.sqrt((Px - x3)**2 + (Py - y3)**2)
                     percentage = distance_to_marker1 / goal_length
 
-                    return percentage
-        return None
+                    return frame, percentage
+        return frame, None
     
     def calculate_motor_command(self, percentage):
         return int((1950 - 80) * percentage)  # Return as integer

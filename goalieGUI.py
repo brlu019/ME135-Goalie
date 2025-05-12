@@ -85,7 +85,7 @@ def calibrate_window(ctrl):
     cal_win.close()
     return centers
 
-def track_window(ctrl, goal_positions):
+def track_window(ctrl):
     """
     Phase 3: ball tracking window.
     Shows live feed + mask with sliders.  Has a 'Lock' button
@@ -99,7 +99,7 @@ def track_window(ctrl, goal_positions):
       [ sg.Text('U-H'), sg.Slider((0,179),179,1,orientation='h', key='U_H'),
         sg.Text('U-S'), sg.Slider((0,255),255,1,orientation='h', key='U_S'),
         sg.Text('U-V'), sg.Slider((0,255),255,1,orientation='h', key='U_V') ],
-      [ sg.Button('Lock HSV'), sg.Button('Exit Tracking') ],
+      [ sg.Button('Lock HSV'), sg.Button('Reset Shot'), sg.Button('Exit Tracking') ],
       [ sg.Text('', key='-TRACK-STATUS-') ]
     ]
     win = sg.Window('Ball Tracking',
@@ -109,11 +109,22 @@ def track_window(ctrl, goal_positions):
 
     locked = False
     hsv_bounds = None
+    reset_shot = True
 
     while True:
         event, vals = win.read(timeout=20)
         if event in (sg.WIN_CLOSED, 'Exit Tracking'):
             break
+
+        if event == 'Reset Shot':
+            # clear the trajectory/history so we can collect a fresh shot
+            ctrl.pts.clear()
+            ctrl.times.clear()
+            ctrl.last_sent_percentage = None
+            ctrl.command_sent = False
+            reset_shot = True
+            win['-TRACK-STATUS-'].update('Ready for next shot ✔')
+            continue
 
         ok, frame = ctrl.get_frame()
         if not ok or frame is None:
@@ -134,7 +145,9 @@ def track_window(ctrl, goal_positions):
         else:
             low_h, low_s, low_v, up_h, up_s, up_v = hsv_bounds
 
-        # do your downsample + mask
+        # TODO: overlay any tracking/prediction results here
+        frame, precentage = ctrl.predict_ball_trajectory(win)
+
         small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2),
                            interpolation=cv2.INTER_AREA)
         hsv  = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
@@ -142,13 +155,11 @@ def track_window(ctrl, goal_positions):
         up   = np.array([up_h, up_s, up_v])
         mask = cv2.inRange(hsv, low, up)
 
-        # TODO: overlay any tracking/prediction results here
-        precentage = ctrl.predict_ball_trajectory(win)
-
-        if precentage is not None:
+        if precentage is not None and reset_shot:
             cmd = ctrl.calculate_motor_command(precentage)
             ctrl.send_motor_command(cmd)
             print(f"Motor Command: {cmd}")
+            reset_shot = False
 
         # update images
         win['-TRACK-FRAME-'].update(data=cv2.imencode('.png', small)[1].tobytes())
@@ -168,7 +179,7 @@ def main():
         return
 
     # Phase 3: Tracking
-    track_window(ctrl, centers)
+    track_window(ctrl)
 
 
 if __name__ == '__main__':
