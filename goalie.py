@@ -8,7 +8,7 @@ import queue
 import concurrent.futures
 
 # Initialize serial communication with the motor controller
-ser = serial.Serial('COM5', 115200, timeout=1)
+ser = serial.Serial('COM4', 115200, timeout=1)
 time.sleep(2)
 
 # Create a queue that always holds the latest frame
@@ -199,6 +199,10 @@ def sendMotorCommand(command):
     except serial.SerialException as e:
         # print(f"Error sending command: {e}")
         return
+    
+def setMaxPWM(labviewInput):
+    max_pwm = labviewInput
+    print("Max PWM set to:", max_pwm)
 
     # response = ser.readline().decode().strip()
     # if response:
@@ -236,7 +240,7 @@ def main():
         time.sleep(3)
 
     # Initialize the camera
-    cap = cv2.VideoCapture(1)
+    cap = cv2.VideoCapture(0)
     while not cap.isOpened():
         print("Waiting for camera connection...")
         time.sleep(3)
