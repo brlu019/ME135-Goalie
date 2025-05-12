@@ -10,7 +10,7 @@ def init_window():
     'Next' closes this window and returns a controller.
     """
     layout = [
-        [ sg.Text('COM Port:'),  sg.Input('COM4', key='COM'),
+        [ sg.Text('COM Port:'),  sg.Input('COM5', key='COM'),
           sg.Text('Camera #:'), sg.Input('1',   key='CAM') ],
         [ sg.Button('Init Serial'), sg.Text('', key='-SERIAL-') ],
         [ sg.Button('Init Camera'), sg.Text('', key='-CAMERA-') ],
@@ -126,9 +126,9 @@ def track_window(ctrl):
             win['-TRACK-STATUS-'].update('Ready for next shot ✔')
             continue
 
-        ok, frame = ctrl.get_frame()
-        if not ok or frame is None:
-            continue
+        # ok, frame = ctrl.get_frame()
+        # if not ok or frame is None:
+        #     continue
 
         # if not yet locked, read sliders each iteration
         if event == 'Lock HSV':
@@ -146,14 +146,17 @@ def track_window(ctrl):
             low_h, low_s, low_v, up_h, up_s, up_v = hsv_bounds
 
         # TODO: overlay any tracking/prediction results here
-        frame, precentage = ctrl.predict_ball_trajectory(win)
+        frame, mask, precentage = ctrl.predict_ball_trajectory(win)
+        if frame is None:
+            # no new frame yet, skip this GUI tick
+            continue
 
-        small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2),
-                           interpolation=cv2.INTER_AREA)
-        hsv  = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        low  = np.array([low_h, low_s, low_v])
-        up   = np.array([up_h, up_s, up_v])
-        mask = cv2.inRange(hsv, low, up)
+        # small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2),
+        #                    interpolation=cv2.INTER_AREA)
+        # hsv  = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        # low  = np.array([low_h, low_s, low_v])
+        # up   = np.array([up_h, up_s, up_v])
+        # mask = cv2.inRange(hsv, low, up)
 
         if precentage is not None and reset_shot:
             cmd = ctrl.calculate_motor_command(precentage)
@@ -162,7 +165,7 @@ def track_window(ctrl):
             reset_shot = False
 
         # update images
-        win['-TRACK-FRAME-'].update(data=cv2.imencode('.png', small)[1].tobytes())
+        win['-TRACK-FRAME-'].update(data=cv2.imencode('.png', frame)[1].tobytes())
         win['-TRACK-MASK-'].update(data=cv2.imencode('.png', mask)[1].tobytes())
 
     win.close()

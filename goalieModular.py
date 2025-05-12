@@ -112,6 +112,7 @@ class GoalieController:
             for (cx,cy) in self.goal_positions:
                 cv2.circle(frame, (cx,cy), 5, (0,0,255), -1)
             if len(self.goal_positions)==2:
+                self.goal_positions[0], self.goal_positions[1] = self.goal_positions[1], self.goal_positions[0]
                 cv2.line(frame, self.goal_positions[0], self.goal_positions[1], (255,0,0), 2)
 
             # 5. Push back to GUI
@@ -133,7 +134,10 @@ class GoalieController:
                     sg.popup("Two markers not found. Adjust sliders and try again.")
     
     def predict_ball_trajectory(self, window):
-        frame = self.frame_queue.get()
+        ok, frame = self.get_frame()
+        if not ok or frame is None:
+            return None, None, None
+        frame = cv2.resize(frame, (540, 960))
         event, values = window.read(timeout=20)
         if self.hsv_locked and self.hsv_bounds is not None:
             low_h, low_s, low_v, up_h, up_s, up_v = self.hsv_bounds
@@ -151,6 +155,10 @@ class GoalieController:
         lower = np.array([low_h, low_s, low_v])
         upper = np.array([up_h,  up_s,  up_v])
         mask = cv2.inRange(hsv, lower, upper)
+        for i, center in enumerate(self.goal_positions):
+            cv2.circle(mask, center, 70, 0, -1)
+            cv2.circle(mask, (500, 265), 30, 0, -1)
+        cv2.line(mask, self.goal_positions[0], self.goal_positions[1], 0, 200)
 
         # Find contour (ball) in the cropped mask
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -229,8 +237,8 @@ class GoalieController:
                     distance_to_marker1 = np.sqrt((Px - x3)**2 + (Py - y3)**2)
                     percentage = distance_to_marker1 / goal_length
 
-                    return frame, percentage
-        return frame, None
+                    return frame, mask, percentage
+        return frame, mask, None
     
     def calculate_motor_command(self, percentage):
         return int((1950 - 80) * percentage)  # Return as integer
@@ -250,129 +258,3 @@ class GoalieController:
         #     print(f"Response from motor controller: {response}")
         # else:
         #     print("No response from motor controller.")
-
-
-
-
-
-def predictBallTrajectory(cap, frame, pts, times, goal_positions):
-    points = np.array(pts)
-    timestamps = np.array(times)
-    timestamps -= timestamps[-1]  # Normalize timestamps to start from 0
-
-    if np.abs(timestamps[0] - timestamps[-1]) < 1e-3:
-        print("Not enough time difference between points.")
-        return  # Avoid unstable regression if too little time difference
-
-    # Fit a line to the x and y coordinates using linear regression
-    A = np.vstack([timestamps, np.ones(len(timestamps))]).T  # Design matrix for linear regression
-    velocity_x, _ = np.linalg.lstsq(A, points[:, 0], rcond=None)[0]  # Slope for x-coordinates
-    velocity_y, _ = np.linalg.lstsq(A, points[:, 1], rcond=None)[0]  # Slope for y-coordinates
-
-    # Predict future position after 200 ms
-    prediction_time = 0.2
-    pred_x = int(pts[0][0] + velocity_x * prediction_time)
-    pred_y = int(pts[0][1] + velocity_y * prediction_time)
-
-    cv2.line(frame, pts[0], (pred_x, pred_y), (255, 0, 0), 2)
-    cv2.circle(frame, (pred_x, pred_y), 5, (255, 0, 0), -1)
-
-    (x1, y1) = pts[0]
-    (x2, y2) = (pred_x, pred_y)
-    (x3, y3), (x4, y4) = goal_positions
-
-    denom = (x1 - x2)*(y3 - y4) - (y1 - y2)*(x3 - x4)
-
-    if denom != 0:
-        Px = int(((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / denom)
-        Py = int(((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / denom)
-
-        # Plot intersection point if between goal posts
-        if (min(x3, x4) <= Px <= max(x3, x4)) and (min(y3, y4) <= Py <= max(y3, y4)):
-            # Check if the ball is moving towards the goal
-            goal_dx = x4 - x3
-            goal_dy = y4 - y3
-
-            # Perpendicular vector to the goal line
-            perp_goal_dx = -goal_dy
-            perp_goal_dy = goal_dx
-
-            # Dot product to check direction
-            dot_product = perp_goal_dx * velocity_x + perp_goal_dy * velocity_y
-
-            # Calculate percentage of the goal line
-            goal_length = np.sqrt((x4 - x3)**2 + (y4 - y3)**2)
-            distance_to_marker1 = np.sqrt((Px - x3)**2 + (Py - y3)**2)
-            percentage = distance_to_marker1 / goal_length
-
-            return percentage
-    return None
-
-
-def tracking():
-    print("Press 'r' to reset for shot.")
-    while True:
-        if not cap.isOpened():
-            print("Camera disconnected.")
-            break
-
-        if frame_queue.empty():
-            continue
-
-        frame = frame_queue.get()
-        future = executor.submit(process_frame, frame, goal_positions)
-        frame, cropped_mask = future.result()
-
-        # Find contour (ball) in the cropped mask
-        contours, _ = cv2.findContours(cropped_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        center = None
-
-        if contours:
-            # Sort contours by area and process the largest one
-            c = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(c)
-
-            # Check if the contour is circular and within the frame
-            if 100 < area < 7500:
-                ((x, y), radius) = cv2.minEnclosingCircle(c)
-                x, y, w, h = cv2.boundingRect(c)
-                if x > 0 and y > 0 and (x + w) < frame.shape[1] and (y + h) < frame.shape[0]:  # Fully within frame
-                    M = cv2.moments(c)
-                    if M["m00"] != 0:
-                        center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-
-                        # Draw detected ball
-                        cv2.circle(frame, center, int(radius), (0, 255, 0), 2)
-
-                        pts.appendleft(center)
-                        times.appendleft(time.time())
-
-        if len(pts) >= 10 and not command_sent:  # Only process if no command has been sent
-            percentage = predictBallTrajectory(cap, frame, pts, times, goal_positions)
-            if percentage is not None:
-                if last_sent_percentage is None or abs(percentage - last_sent_percentage) > 0.03:
-                    # Calculate motor command based on percentage
-                    command = calculateMotorCommand(percentage)
-                    sendMotorCommand(str(command))
-                    last_sent_percentage = percentage
-                    command_sent = True  # Set flag to indicate command has been sent
-                    print("Motor command sent. Waiting for reset...")
-
-        # Reset logic
-        if cv2.waitKey(1) & 0xFF == ord('r'):  # Reset when 'r' is pressed
-            command_sent = False
-            pts.clear()
-            times.clear()
-            last_sent_percentage = None
-            print("Reset complete. Ready for next shot.")
-            time.sleep(1)
-
-        cv2.imshow("Ball Trajectory Prediction", frame)
-        cv2.imshow("Calibration", cropped_mask)
-
-        if cv2.waitKey(1) & 0xFF == 27:  # ESC key to exit
-            print("Exiting...")
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
