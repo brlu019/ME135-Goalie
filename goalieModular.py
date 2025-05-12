@@ -1,61 +1,137 @@
-import cv2
+import cv2, time, serial, threading, queue
 import numpy as np
-import time
-import serial
 from collections import deque
-import threading
-import queue
-import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+import PySimpleGUI as sg
+
+class GoalieController:
+    def __init__(self, comPort):
+        self.comPort = comPort
+        self.ser = None
+        self.cap = None
+
+        self.pts = deque(maxlen=10)  # recent 10 positions
+        self.times = deque(maxlen=10)
+        self.goal_positions = []
+        self.percentage = None
+        self.last_sent_percentage = None
+        self.command_sent = True  # Flag to track if a command has been sent, initially true
+
+        self.frame_queue = queue.Queue(maxsize=1)
+        self.capture_thread = None
+        self.executor = ThreadPoolExecutor(max_workers=1)
+
+    def init_serial(self):
+        try:
+            # Initialize serial communication with the motor controller
+            self.ser = serial.Serial(self.comPort, 115200, timeout=1)
+            time.sleep(2)
+            self.ser.open()
+            print("Serial port opened successfully.")
+        except serial.SerialException as e:
+            print(f"Error opening serial port: {e}")
+            time.sleep(3)
+
+    def init_camera(self):
+        # Initialize the camera
+        self.cap = cv2.VideoCapture(1)
+        while not self.cap.isOpened():
+            print("Waiting for camera connection...")
+            time.sleep(3)
+        print("Camera connected.")
+
+    def start_capture(self):
+        def capture():
+            while True:
+                ret, frame = self.cap.read()
+                if not ret:
+                    continue
+                if not self.frame_queue.empty():
+                    try:
+                        self.frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                self.frame_queue.put(frame)
+        self.capture_thread = threading.Thread(target=capture, daemon=True)
+        self.capture_thread.start()
+
+    def get_frame(self):
+        try:
+            frame = self.frame_queue.get_nowait()
+        except queue.Empty:
+            frame = None
+
+    def calibrate_goals(self, low_h, low_s, low_v, up_h, up_s, up_v, window):
+        lower_range = np.array([low_h, low_s, low_v])
+        upper_range = np.array([up_h, up_s, up_v])
+
+        while True:
+            ret, frame = self.get_frame()
+            if not ret:
+                continue
+            frame = cv2.resize(frame, (540, 960))
+            sv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(sv, lower_range, upper_range)
+            cv2.circle(mask, (500, 265), 30, 0, -1)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(contours) >= 2:
+                contours = sorted(contours, key=cv2.contourArea, reverse=True)[:2]
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    peri = cv2.arcLength(cnt, True)
+                    circ = 4*np.pi*(area/(peri*peri)) if peri>0 else 0
+                    if 100 < area < 1e5 and circ > 0.8:
+                        M = cv2.moments(cnt)
+                        if M["m00"]!=0:
+                            cx = int(M["m10"]/M["m00"])
+                            cy = int(M["m01"]/M["m00"])
+                            self.goal_positions.append((cx, cy))
+
+            # 4. Draw results on frame
+            for (cx,cy) in self.goal_positions:
+                cv2.circle(frame, (cx,cy), 5, (0,0,255), -1)
+            if len(self.goal_positions)==2:
+                cv2.line(frame, self.goal_positions[0], self.goal_positions[1], (255,0,0), 2)
+
+            # 5. Push back to GUI
+            frame_bytes = cv2.imencode('.png', frame)[1].tobytes()
+            mask_bytes  = cv2.imencode('.png', mask)[1].tobytes()
+            window['-FRAME-'].update(data=frame_bytes)
+            window['-MASK-'].update(data=mask_bytes)
+
+            # 6. GUI event loop
+            event, _ = window.read(timeout=20)
+            if event in (sg.WIN_CLOSED, 'Exit'):
+                sg.popup("Calibration cancelled.")
+                return None
+            if event == 'Confirm':
+                if len(self.goal_positions)==2:
+                    return self.goal_positions
+                else:
+                    sg.popup("Two markers not found. Adjust sliders and try again.")
+    
+    def calculateMotorCommand(self, percentage):
+        return int((1950 - 80) * percentage)  # Return as integer
+
+    def sendMotorCommand(self, command):
+        package = command.encode()
+        self.ser.reset_input_buffer()  # Clear input buffer before sending command
+        self.ser.reset_output_buffer()  # Clear output buffer before sending command
+        try:
+            self.ser.write(package)  # Send command to motor controller
+            print(f"Motor command sent: {command}")
+        except serial.SerialException as e:
+            # print(f"Error sending command: {e}")
+            return
+        # response = ser.readline().decode().strip()
+        # if response:
+        #     print(f"Response from motor controller: {response}")
+        # else:
+        #     print("No response from motor controller.")
 
 
-def initialize_serial_imports(comPort):
-    try:
-        # Initialize serial communication with the motor controller
-        ser = serial.Serial(comPort, 115200, timeout=1)
-        time.sleep(2)
-        ser.open()
-        print("Serial port opened successfully.")
-    except serial.SerialException as e:
-        print(f"Error opening serial port: {e}")
-        time.sleep(3)  # Wait before retrying
-
-def debug():
-    import sys
-    print("EXE:", sys.executable)
-    print("PATHS:", sys.path)
 
 
-def initialize_camera():
-    # Initialize the camera
-    cap = cv2.VideoCapture(1)
-    while not cap.isOpened():
-        print("Waiting for camera connection...")
-        time.sleep(3)
-    print("Camera connected.")
-
-def initialize_queues_and_threads_globalvariables():
-    # Create a queue that always holds the latest frame
-    frame_queue = queue.Queue(maxsize=1)
-    threading.Thread(target=frame_capture_thread, args=(cap, frame_queue), daemon=True).start()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    pts = deque(maxlen=10)  # recent 10 positions
-    times = deque(maxlen=10)
-    percentage = None
-    last_sent_percentage = None
-    command_sent = True  # Flag to track if a command has been sent, initally true
-
-def frame_capture_thread(cap, frame_queue):
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        # Put frame in queue, replacing the old one if necessary
-        if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
-        frame_queue.put(frame)
 
 def nothing(x):
     pass
@@ -82,13 +158,6 @@ def dynamicHSVCalibration():
 
     return lower_range, upper_range
 
-# def morphCleaning(mask):
-#     kernel = np.ones((5, 5), np.uint8)
-#     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-#     mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
-    
-#     return mask
-
 def getGoalPositions(cap):
     goalDetected = False
     createTrackbars()
@@ -112,7 +181,7 @@ def getGoalPositions(cap):
 
         # Find contours (markers)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        marker_centers = []
+        goal_positions = []
 
         if len(contours) >= 5:
             contours = sorted(contours, key=cv2.contourArea, reverse=True)[:2]  # Get the two largest contours
@@ -130,22 +199,22 @@ def getGoalPositions(cap):
                         if M["m00"] != 0:
                             cx = int(M["m10"] / M["m00"])
                             cy = int(M["m01"] / M["m00"])
-                            marker_centers.append((cx, cy))
+                            goal_positions.append((cx, cy))
                             cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)  # Draw detected marker centers
 
-            if len(marker_centers) == 2:
+            if len(goal_positions) == 2:
                 # Sort markers by x-coordinate (leftmost first)
-                marker_centers = sorted(marker_centers, key=lambda center: center[0])
+                goal_positions = sorted(goal_positions, key=lambda center: center[0])
 
                 # Draw a line between the two markers
-                cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 2)
+                cv2.line(frame, goal_positions[0], goal_positions[1], (255, 0, 0), 2)
 
                 # Label the markers
-                cv2.putText(frame, f"Marker 1 {marker_centers[0]}", 
-                            (marker_centers[0][0] + 10, marker_centers[0][1]),
+                cv2.putText(frame, f"Marker 1 {goal_positions[0]}", 
+                            (goal_positions[0][0] + 10, goal_positions[0][1]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                cv2.putText(frame, f"Marker 2 {marker_centers[1]}", 
-                            (marker_centers[1][0] + 10, marker_centers[1][1]),
+                cv2.putText(frame, f"Marker 2 {goal_positions[1]}", 
+                            (goal_positions[1][0] + 10, goal_positions[1][1]),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         # Display frames
@@ -153,7 +222,7 @@ def getGoalPositions(cap):
         cv2.imshow("Frame", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('c'):
-            if len(marker_centers) == 2:
+            if len(goal_positions) == 2:
                 goalDetected = True
                 print("Goal detected!")
             else:
@@ -161,7 +230,7 @@ def getGoalPositions(cap):
     
     cv2.destroyAllWindows()
 
-    return marker_centers
+    return goal_positions
 
 def predictBallTrajectory(cap, frame, pts, times, goal_positions):
     points = np.array(pts)
@@ -216,27 +285,7 @@ def predictBallTrajectory(cap, frame, pts, times, goal_positions):
             return percentage
     return None
 
-def calculateMotorCommand(percentage):
-    return int((1950 - 80) * percentage)  # Return as integer
-
-def sendMotorCommand(command):
-    package = command.encode()
-    ser.reset_input_buffer()  # Clear input buffer before sending command
-    ser.reset_output_buffer()  # Clear output buffer before sending command
-    try:
-        ser.write(package)  # Send command to motor controller
-        print(f"Motor command sent: {command}")
-    except serial.SerialException as e:
-        # print(f"Error sending command: {e}")
-        return
-
-    # response = ser.readline().decode().strip()
-    # if response:
-    #     print(f"Response from motor controller: {response}")
-    # else:
-    #     print("No response from motor controller.")
-
-def process_frame(frame, marker_centers):
+def process_frame(frame, goal_positions):
     frame = cv2.resize(frame, (540, 960))
     sv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     lower_range, upper_range = dynamicHSVCalibration()
@@ -244,15 +293,15 @@ def process_frame(frame, marker_centers):
     # mask = morphCleaning(mask)
 
     # Draw the markers, etc.
-    for i, center in enumerate(marker_centers):
+    for i, center in enumerate(goal_positions):
         cv2.circle(mask, center, 70, 0, -1)
         cv2.circle(mask, (500, 265), 30, 0, -1)
         cv2.circle(frame, center, 3, (0, 255, 255), -1)
-    cv2.line(frame, marker_centers[0], marker_centers[1], (255, 0, 0), 2)
+    cv2.line(frame, goal_positions[0], goal_positions[1], (255, 0, 0), 2)
 
-    crop_y = min(marker_centers[0][1], marker_centers[1][1])
-    # crop_x_min = marker_centers[0][0]
-    # crop_x_max = marker_centers[1][0]
+    crop_y = min(goal_positions[0][1], goal_positions[1][1])
+    # crop_x_min = goal_positions[0][0]
+    # crop_x_max = goal_positions[1][0]
     cropped_frame = frame[crop_y:, :]
     cropped_mask = mask[crop_y:, :]
     
@@ -270,7 +319,7 @@ def tracking():
             continue
 
         frame = frame_queue.get()
-        future = executor.submit(process_frame, frame, marker_centers)
+        future = executor.submit(process_frame, frame, goal_positions)
         cropped_frame, cropped_mask = future.result()
 
         # Find contour (ball) in the cropped mask
@@ -298,7 +347,7 @@ def tracking():
                         times.appendleft(time.time())
 
         if len(pts) >= 10 and not command_sent:  # Only process if no command has been sent
-            percentage = predictBallTrajectory(cap, cropped_frame, pts, times, marker_centers)
+            percentage = predictBallTrajectory(cap, cropped_frame, pts, times, goal_positions)
             if percentage is not None:
                 if last_sent_percentage is None or abs(percentage - last_sent_percentage) > 0.03:
                     # Calculate motor command based on percentage
@@ -343,7 +392,7 @@ def tracking():
     # Start frame capture thread
     # threading.Thread(target=frame_capture_thread, args=(cap, frame_queue), daemon=True).start()
 
-    # marker_centers = getGoalPositions(cap)
+    # goal_positions = getGoalPositions(cap)
 
     # pts = deque(maxlen=10)  # recent 6 positions
     # times = deque(maxlen=10)
@@ -365,7 +414,7 @@ def tracking():
     #         continue
 
     #     frame = frame_queue.get()
-    #     future = executor.submit(process_frame, frame, marker_centers)
+    #     future = executor.submit(process_frame, frame, goal_positions)
     #     cropped_frame, cropped_mask = future.result()
 
     #     # Find contour (ball) in the cropped mask
@@ -393,7 +442,7 @@ def tracking():
     #                     times.appendleft(time.time())
 
     #     if len(pts) >= 10 and not command_sent:  # Only process if no command has been sent
-    #         percentage = predictBallTrajectory(cap, cropped_frame, pts, times, marker_centers)
+    #         percentage = predictBallTrajectory(cap, cropped_frame, pts, times, goal_positions)
     #         if percentage is not None:
     #             if last_sent_percentage is None or abs(percentage - last_sent_percentage) > 0.03:
     #                 # Calculate motor command based on percentage
